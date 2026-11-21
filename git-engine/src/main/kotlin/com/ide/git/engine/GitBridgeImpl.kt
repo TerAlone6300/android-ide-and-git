@@ -6,24 +6,37 @@ import com.ide.git.bridge.GitEngineClient
 import com.ide.git.bridge.GitFileStatus
 import com.ide.git.bridge.GitOperationResult
 import com.ide.git.bridge.IdeGitHost
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.File
 
 /**
- * Owns the single Git engine/client pair for one open project.
- *
- * Call openProject() when the IDE opens a workspace and closeProject() before
- * discarding the bridge. UI code can call refreshStatuses() after Git actions.
+ * Owns one repository session, one status client and the host-aware engine.
+ * Git actions automatically publish status; pull/checkout also request editor
+ * reloads for paths changed between the previous and resulting HEAD.
  */
 class GitBridgeImpl(
-    override val engine: JGitGitEngine = JGitGitEngine(),
+    private val jgitEngine: JGitGitEngine = JGitGitEngine(),
     override val client: JGitGitEngineClient = JGitGitEngineClient()
 ) : GitBridge {
 
     private val lifecycleMutex = Mutex()
+    private val operationMutex = Mutex()
 
     @Volatile
     private var host: IdeGitHost? = null
+
+    @Volatile
+    private var projectRoot: File? = null
+
+    override val engine: GitEngine = HostAwareGitEngine(
+        delegate = jgitEngine,
+        projectRoot = { projectRoot },
+        host = { host },
+        operationMutex = operationMutex,
+        refreshStatuses = { refreshStatuses() }
+    )
 
     override fun attachHost(host: IdeGitHost) {
         this.host = host
@@ -35,33 +48,48 @@ class GitBridgeImpl(
 
     suspend fun openProject(rootPath: String): GitOperationResult<Unit> =
         lifecycleMutex.withLock {
-            val result = engine.openRepository(rootPath)
-            if (result is GitOperationResult.Success) {
-                client.onProjectOpened(rootPath)
+            operationMutex.withLock {
+                val result = jgitEngine.openRepository(rootPath)
+                if (result is GitOperationResult.Success) {
+                    projectRoot = File(rootPath).canonicalFile
+                    client.onProjectOpened(rootPath)
+                    refreshStatuses()
+                } else if (result is GitOperationResult.Failure) {
+                    host?.showGitError("Open repository failed", result.message)
+                }
+                result
             }
-            result
         }
 
     suspend fun closeProject() {
         lifecycleMutex.withLock {
-            client.onProjectClosed()
-            engine.closeRepository()
+            operationMutex.withLock {
+                projectRoot = null
+                client.onProjectClosed()
+                jgitEngine.closeRepository()
+                host?.updateGitStatuses(emptyMap())
+            }
         }
     }
 
-    /**
-     * Reads current status and publishes it to the attached IDE host.
-     */
+    /** Reads status on IO and publishes it to the attached IDE host. */
     suspend fun refreshStatuses(): Map<String, GitFileStatus> {
-        val statuses = client.getFileStatuses()
-        host?.updateGitStatuses(statuses)
-        return statuses
+        return try {
+            val statuses = client.getFileStatuses()
+            host?.updateGitStatuses(statuses)
+            statuses
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            host?.showGitError(
+                "Git status failed",
+                failure.message ?: "Unable to read repository status"
+            )
+            emptyMap()
+        }
     }
 
-    /**
-     * Convenience hook for IDE events. This does not perform I/O; the caller
-     * decides when to request refreshStatuses() from a coroutine.
-     */
+    /** Call from a coroutine after the IDE saves a file. */
     fun notifyFileSaved(relativePath: String) {
         client.onFileSaved(relativePath)
     }

@@ -26,8 +26,9 @@ class IdeGitHostImpl(
     private val onConfirmOverwriteDirty: (suspend (filePath: String) -> Boolean)? = null
 ) : IdeGitHost {
 
-    private val _fileStatuses = MutableStateFlow>(emptyMap())
-    val fileStatuses: StateFlow> = _fileStatuses.asStateFlow()
+    private val _fileStatuses =
+        MutableStateFlow<Map<String, GitFileStatus>>(emptyMap())
+    val fileStatuses: StateFlow<Map<String, GitFileStatus>> = _fileStatuses.asStateFlow()
 
     private val _activeDiff = MutableStateFlow<DiffRequest?>(null)
     val activeDiff: StateFlow<DiffRequest?> = _activeDiff.asStateFlow()
@@ -43,14 +44,12 @@ class IdeGitHostImpl(
         if (!editorController.isDirty(rel)) {
             return@withContext false
         }
+
         val allowOverwrite = onConfirmOverwriteDirty?.invoke(rel) ?: false
         if (!allowOverwrite) return@withContext false
 
-        // Nếu người dùng xác nhận ghi đè thì mở/ghi đè lại từ đĩa
-        val target = editorController.resolveFile(rel)
-        if (!target.toFile().exists()) return@withContext false
-        editorController.editContent(rel, target.toFile().readText())
-        true
+        // A confirmed overwrite must replace the buffer and clear its dirty flag.
+        editorController.forceReloadFromDisk(rel)
     }
 
     override fun openFileAt(filePath: String, line: Int) {
@@ -74,6 +73,8 @@ class IdeGitHostImpl(
     }
 
     override fun updateGitStatuses(statuses: Map<String, GitFileStatus>) {
-        _fileStatuses.value = statuses.mapKeys { (k, _) -> editorController.toRelativePath(k) }
+        _fileStatuses.value = statuses.mapKeys { (path, _) ->
+            editorController.toRelativePath(path)
+        }
     }
 }

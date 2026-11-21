@@ -19,18 +19,31 @@ class WorkspaceEditorController(
     private val rootPath: Path = Path(projectRoot).toAbsolutePath().normalize()
     private val openFiles = linkedMapOf<String, OpenEditorFile>()
 
+    /** All paths crossing the Git bridge are normalized project-relative paths. */
     fun toRelativePath(pathOrRelative: String): String {
         val candidate = Path(pathOrRelative)
         val normalized = if (candidate.isAbsolute) {
-            rootPath.relativize(candidate.toAbsolutePath().normalize())
+            val absolute = candidate.toAbsolutePath().normalize()
+            require(absolute.startsWith(rootPath)) {
+                "Path is outside the project root: $pathOrRelative"
+            }
+            rootPath.relativize(absolute)
         } else {
             candidate.normalize()
         }
-        return normalized.toString().replace('\\', '/')
+        val relative = normalized.toString().replace('\\', '/')
+        require(relative != ".." && !relative.startsWith("../")) {
+            "Path is outside the project root: $pathOrRelative"
+        }
+        return relative
     }
 
     fun resolveFile(relativePath: String): Path {
-        return rootPath.resolve(toRelativePath(relativePath)).normalize()
+        val resolved = rootPath.resolve(toRelativePath(relativePath)).normalize()
+        require(resolved.startsWith(rootPath)) {
+            "Path is outside the project root: $relativePath"
+        }
+        return resolved
     }
 
     fun openOrFocus(relativePath: String, line: Int = 1): OpenEditorFile? {
@@ -68,16 +81,24 @@ class WorkspaceEditorController(
         return true
     }
 
-    /**
-     * Chỉ reload từ đĩa nếu file không có thay đổi chưa lưu.
-     * Trả về true nếu đã reload, false nếu từ chối do đang dirty.
-     */
-    fun reloadFromDiskIfClean(relativePath: String): Boolean {
+    /** Reload an open buffer only when it is clean; close it if Git deleted the file. */
+    fun reloadFromDiskIfClean(relativePath: String): Boolean =
+        reloadFromDisk(relativePath, allowDirty = false)
+
+    /** Used only after the user explicitly confirms overwriting a dirty buffer. */
+    fun forceReloadFromDisk(relativePath: String): Boolean =
+        reloadFromDisk(relativePath, allowDirty = true)
+
+    private fun reloadFromDisk(relativePath: String, allowDirty: Boolean): Boolean {
         val rel = toRelativePath(relativePath)
-        val current = openFiles[rel] ?: return false
-        if (current.isDirty) return false
+        val current = openFiles[rel] ?: return true
+        if (current.isDirty && !allowDirty) return false
+
         val target = resolveFile(rel)
-        if (!target.exists()) return false
+        if (!target.exists()) {
+            openFiles.remove(rel)
+            return true
+        }
 
         openFiles[rel] = current.copy(
             content = target.readText(),
