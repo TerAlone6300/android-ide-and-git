@@ -26,7 +26,7 @@ class JGitGitEngine(
     private val credentialsProvider: CredentialsProvider? = null,
     private val remoteName: String = "origin",
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
-) : GitEngine, AutoCloseable {
+) : GitEngine {
 
     private val mutex = Mutex()
     @Volatile
@@ -64,11 +64,6 @@ class JGitGitEngine(
                 repository = null
             }
         }
-    }
-
-    override fun close() {
-        repository?.close()
-        repository = null
     }
 
     override suspend fun commit(message: String): GitOperationResult<String> {
