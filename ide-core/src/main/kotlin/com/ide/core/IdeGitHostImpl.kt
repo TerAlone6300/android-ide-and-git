@@ -22,13 +22,12 @@ data class GitErrorBanner(
 
 class IdeGitHostImpl(
     private val editorController: WorkspaceEditorController,
-    private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
+    private val callbackDispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val onConfirmOverwriteDirty: (suspend (filePath: String) -> Boolean)? = null
 ) : IdeGitHost {
 
-    private val _fileStatuses =
-        MutableStateFlow<Map<String, GitFileStatus>>(emptyMap())
-    val fileStatuses: StateFlow<Map<String, GitFileStatus>> = _fileStatuses.asStateFlow()
+    private val _fileStatuses = MutableStateFlow>(emptyMap())
+    val fileStatuses: StateFlow> = _fileStatuses.asStateFlow()
 
     private val _activeDiff = MutableStateFlow<DiffRequest?>(null)
     val activeDiff: StateFlow<DiffRequest?> = _activeDiff.asStateFlow()
@@ -36,7 +35,7 @@ class IdeGitHostImpl(
     private val _lastError = MutableStateFlow<GitErrorBanner?>(null)
     val lastError: StateFlow<GitErrorBanner?> = _lastError.asStateFlow()
 
-    override suspend fun requestFileReload(filePath: String): Boolean = withContext(mainDispatcher) {
+    override suspend fun requestFileReload(filePath: String): Boolean = withContext(callbackDispatcher) {
         val rel = editorController.toRelativePath(filePath)
         if (editorController.reloadFromDiskIfClean(rel)) {
             return@withContext true
@@ -44,11 +43,9 @@ class IdeGitHostImpl(
         if (!editorController.isDirty(rel)) {
             return@withContext false
         }
-
         val allowOverwrite = onConfirmOverwriteDirty?.invoke(rel) ?: false
         if (!allowOverwrite) return@withContext false
 
-        // A confirmed overwrite must replace the buffer and clear its dirty flag.
         editorController.forceReloadFromDisk(rel)
     }
 
@@ -73,8 +70,6 @@ class IdeGitHostImpl(
     }
 
     override fun updateGitStatuses(statuses: Map<String, GitFileStatus>) {
-        _fileStatuses.value = statuses.mapKeys { (path, _) ->
-            editorController.toRelativePath(path)
-        }
+        _fileStatuses.value = statuses.mapKeys { (k, _) -> editorController.toRelativePath(k) }
     }
 }
